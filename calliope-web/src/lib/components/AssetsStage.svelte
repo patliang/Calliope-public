@@ -5,8 +5,10 @@
 	import {
 		assetUrl,
 		jobsApi,
+		libraryApi,
 		playgroundApi,
 		projects,
+		settings as settingsApi,
 		workflows,
 		type Character,
 		type Item,
@@ -24,6 +26,7 @@
 	import ImageLightbox from '$lib/components/ImageLightbox.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 	import Card from '$lib/components/ui/Card.svelte';
+	import Modal from '$lib/components/ui/Modal.svelte';
 	import ProgressBar from '$lib/components/ui/ProgressBar.svelte';
 	import Skeleton from '$lib/components/ui/Skeleton.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -34,6 +37,7 @@
 		withoutPromptInputs,
 		workflowHasPromptInput,
 	} from '$lib/comfy/promptInput';
+	import { ROUTER_IMAGE_VALUE, routerModelOf } from '$lib/comfy/router';
 	import {
 		characterSheetTemplate,
 		itemReferenceTemplate,
@@ -140,9 +144,9 @@
 	}
 	let drafts = $state<Record<string, string>>({});
 	let savingKey = $state<string | null>(null);
-	let sheetWorkflowId = $state<number | ''>('');
-	let envWorkflowId = $state<number | ''>('');
-	let itemWorkflowId = $state<number | ''>('');
+	let sheetWorkflowId = $state<number | string>('');
+	let envWorkflowId = $state<number | string>('');
+	let itemWorkflowId = $state<number | string>('');
 	let sheetInputValues = $state<Record<string, string | number>>({});
 	let envInputValues = $state<Record<string, string | number>>({});
 	let itemInputValues = $state<Record<string, string | number>>({});
@@ -152,7 +156,7 @@
 	let sheetAttempted = $state(false);
 	let envAttempted = $state(false);
 	let itemAttempted = $state(false);
-	let lastSheetWf = $state<number | '' | null>(null);
+	let lastSheetWf = $state<number | string | null>(null);
 	let previewSrc = $state<string | null>(null);
 	let previewAlt = $state('');
 
@@ -161,9 +165,46 @@
 		previewSrc = src;
 		previewAlt = alt;
 	}
-	let lastEnvWf = $state<number | '' | null>(null);
-	let lastItemWf = $state<number | '' | null>(null);
+	let lastEnvWf = $state<number | string | null>(null);
+	let lastItemWf = $state<number | string | null>(null);
 	let bulkPending = $state(false);
+	let createAssetOpen = $state(false);
+	let createAssetKind = $state<'character' | 'location' | 'item'>('character');
+	let createAssetName = $state('');
+	let createAssetDescription = $state('');
+	let createAssetRole = $state('');
+	let createAssetAge = $state('');
+	let createAssetPersonality = $state('');
+	let createAssetImagePath = $state<string | null>(null);
+	let uploadingCreateAssetImage = $state(false);
+	let createAssetFileInput: HTMLInputElement | null = $state(null);
+	let editAssetOpen = $state(false);
+	let editAssetKind = $state<'character' | 'location' | 'item'>('character');
+	let editAssetId = $state<number | null>(null);
+	let editAssetName = $state('');
+	let editAssetDescription = $state('');
+	let editAssetRole = $state('');
+	let roleSuggestionsOpen = $state(false);
+	let editAssetAge = $state('');
+	let editAssetPersonality = $state('');
+	let editAssetImagePath = $state<string | null>(null);
+	let editAssetImageChanged = $state(false);
+	const roleSuggestions = [
+		'Protagonist',
+		'Deuteragonist',
+		'Supporting Character',
+		'Antagonist',
+		'Mentor',
+		'Sidekick',
+		'Love Interest',
+		'Rival',
+		'Comic Relief',
+		'Villain',
+		'Henchman',
+		'Narrator',
+		'Background Character',
+		'Cameo Character',
+	];
 
 	type DeleteTarget = { kind: 'character' | 'location' | 'item'; id: number; name: string };
 	let deleteTarget = $state<DeleteTarget | null>(null);
@@ -191,10 +232,27 @@
 	);
 	const filtering = $derived(Boolean(search.trim() || activeTag));
 
+	const libraryMediaQuery = createQuery(
+		toStore(() => ({
+			queryKey: ['library-media'],
+			queryFn: libraryApi.list,
+			enabled: createAssetOpen || editAssetOpen,
+		})),
+	);
+
 	const workflowsQuery = createQuery({
 		queryKey: ['workflows'],
 		queryFn: workflows.list,
 	});
+	const settingsQuery = createQuery({
+		queryKey: ['settings'],
+		queryFn: settingsApi.get,
+	});
+		const fluxOption = $derived(
+		$settingsQuery.data?.comfy_api_key && $settingsQuery.data?.comfy_router_enabled
+			? { value: ROUTER_IMAGE_VALUE, label: t('router.flux3') }
+			: null,
+	);
 
 	// Shared cache key with QueueStage — refreshed via SSE invalidation from
 	// the project page (job.* events), not polling.
@@ -256,7 +314,7 @@
 	const sheetHasPrompt = $derived(workflowHasPromptInput(sheetWorkflow?.input_schema));
 	const envHasPrompt = $derived(workflowHasPromptInput(envWorkflow?.input_schema));
 	const itemHasPrompt = $derived(workflowHasPromptInput(itemWorkflow?.input_schema));
-	const showCharPrompt = $derived(sheetHasPrompt);
+	const showCharPrompt = $derived(sheetHasPrompt || !!routerModelOf(sheetWorkflowId));
 
 	const jobs = $derived($jobsQuery.data ?? []);
 
@@ -339,6 +397,7 @@
 			input_values?: Record<string, unknown>;
 			asset_target?: 'sheet';
 			prompt?: string;
+			router_model?: string;
 		}) => projects.generateAssets(projectId, payload),
 		onSuccess: async () => {
 			await client.invalidateQueries({ queryKey: ['assets'] });
@@ -377,6 +436,133 @@
 		},
 		onError: (err) => {
 			toast.error(err instanceof Error ? err.message : t('assets.toast.deleteFailed'));
+		},
+	});
+
+	const createEntityMutation = createMutation({
+		mutationFn: async ({
+			kind,
+			name,
+			description,
+			role,
+			age,
+			personality,
+		}: {
+			kind: 'character' | 'location' | 'item';
+			name: string;
+			description: string;
+			imagePath: string | null;
+			role: string;
+			age: string;
+			personality: string;
+		}) => {
+			if (kind === 'character')
+				return projects.createCharacter(projectId, {
+					name,
+					role: role || undefined,
+					age: age || undefined,
+					appearance: description || undefined,
+					personality: personality || undefined,
+				});
+			if (kind === 'location')
+				return projects.createLocation(projectId, { name, description: description || undefined });
+			return projects.createItem(projectId, { name, description: description || undefined });
+		},
+		onSuccess: async (asset, { kind, name, imagePath }) => {
+			let imageError: unknown = null;
+			if (imagePath) {
+				try {
+					if (kind === 'character') {
+						await projects.updateCharacter(projectId, asset.id, { sheet_path: imagePath });
+					} else if (kind === 'location') {
+						await projects.updateLocation(projectId, asset.id, {
+							reference_image_path: imagePath,
+						});
+					} else {
+						await projects.updateItem(projectId, asset.id, {
+							reference_image_path: imagePath,
+						});
+					}
+				} catch (err) {
+					imageError = err;
+				}
+			}
+			createAssetOpen = false;
+			createAssetName = '';
+			createAssetDescription = '';
+			createAssetRole = '';
+			createAssetAge = '';
+			createAssetPersonality = '';
+			createAssetImagePath = null;
+			await client.invalidateQueries({ queryKey: ['assets', projectId] });
+			await client.invalidateQueries({ queryKey: ['story', projectId] });
+			await client.invalidateQueries({ queryKey: ['scenes', projectId] });
+			if (imageError) {
+				toast.error(
+					t('assets.toast.imageAttachFailed', {
+						error: imageError instanceof Error ? imageError.message : String(imageError),
+					}),
+				);
+			} else {
+				toast.success(t('assets.toast.created', { kind: kindNoun(kind), name }));
+			}
+		},
+		onError: (err) => {
+			toast.error(err instanceof Error ? err.message : t('assets.toast.createFailed'));
+		},
+	});
+
+	const updateEntityMutation = createMutation({
+		mutationFn: async ({
+			kind,
+			id,
+			name,
+			description,
+			role,
+			age,
+			personality,
+			imagePath,
+			imageChanged,
+		}: {
+			kind: 'character' | 'location' | 'item';
+			id: number;
+			name: string;
+			description: string;
+			role: string;
+			age: string;
+			personality: string;
+			imagePath: string | null;
+			imageChanged: boolean;
+		}) => {
+			if (kind === 'character') {
+				return projects.updateCharacter(projectId, id, {
+					name,
+					role: role || null,
+					age: age || null,
+					appearance: description || null,
+					personality: personality || null,
+					...(imageChanged ? { sheet_path: imagePath } : {}),
+				});
+			}
+			const payload = {
+				name,
+				description: description || null,
+				...(imageChanged ? { reference_image_path: imagePath } : {}),
+			};
+			return kind === 'location'
+				? projects.updateLocation(projectId, id, payload)
+				: projects.updateItem(projectId, id, payload);
+		},
+		onSuccess: async () => {
+			editAssetOpen = false;
+			editAssetId = null;
+			await client.invalidateQueries({ queryKey: ['assets', projectId] });
+			await client.invalidateQueries({ queryKey: ['story', projectId] });
+			await client.invalidateQueries({ queryKey: ['scenes', projectId] });
+			toast.success(t('assets.toast.updated'));
+		},
+		onError: (err) => {
+			toast.error(err instanceof Error ? err.message : t('assets.toast.updateFailed'));
 		},
 	});
 
@@ -432,12 +618,22 @@
 		drafts = { ...drafts, [key]: value };
 	}
 
-	function requireWorkflow(id: number | '', needKey: string): number | null {
-		if (id === '') {
+	function requireWorkflow(id: number | string, needKey: string): number | null {
+		if (id === '' || routerModelOf(id)) {
+			if (id === '') toast.error(t(needKey));
+			return null;
+		}
+		const n = Number(id);
+		if (!Number.isFinite(n)) {
 			toast.error(t(needKey));
 			return null;
 		}
-		return Number(id);
+		return n;
+	}
+
+	function pickWorkflow(value: string): number | string {
+		if (!value) return '';
+		return routerModelOf(value) ? value : Number(value);
 	}
 
 	function requireComplete(missing: string[], markAttempted: () => void): boolean {
@@ -453,6 +649,119 @@
 			: kind === 'location'
 				? t('assets.kind.environment')
 				: t('assets.kind.item');
+	}
+
+	function openCreateAsset() {
+		createAssetKind = tab === 'characters' ? 'character' : tab === 'locations' ? 'location' : 'item';
+		createAssetName = '';
+		createAssetDescription = '';
+		createAssetRole = '';
+		createAssetAge = '';
+		createAssetPersonality = '';
+		createAssetImagePath = null;
+		createAssetOpen = true;
+	}
+
+	function openEditCharacter(char: Character) {
+		editAssetKind = 'character';
+		roleSuggestionsOpen = false;
+		editAssetId = char.id;
+		editAssetName = char.name;
+		editAssetRole = char.role ?? '';
+		editAssetAge = char.age ?? '';
+		editAssetDescription = char.appearance ?? '';
+		editAssetPersonality = char.personality ?? '';
+		editAssetImagePath = char.sheet_path;
+		editAssetImageChanged = false;
+		editAssetOpen = true;
+	}
+
+	function openEditLocation(loc: Location) {
+		editAssetKind = 'location';
+		editAssetId = loc.id;
+		editAssetName = loc.name;
+		editAssetDescription = loc.description ?? '';
+		editAssetRole = '';
+		editAssetAge = '';
+		editAssetPersonality = '';
+		editAssetImagePath = loc.reference_image_path;
+		editAssetImageChanged = false;
+		editAssetOpen = true;
+	}
+
+	function openEditItem(item: Item) {
+		editAssetKind = 'item';
+		editAssetId = item.id;
+		editAssetName = item.name;
+		editAssetDescription = item.description ?? '';
+		editAssetRole = '';
+		editAssetAge = '';
+		editAssetPersonality = '';
+		editAssetImagePath = item.reference_image_path;
+		editAssetImageChanged = false;
+		editAssetOpen = true;
+	}
+
+	function saveEditedAsset() {
+		const name = editAssetName.trim();
+		if (!name || editAssetId === null || $updateEntityMutation.isPending || uploadingCreateAssetImage)
+			return;
+		roleSuggestionsOpen = false;
+		$updateEntityMutation.mutate({
+			kind: editAssetKind,
+			id: editAssetId,
+			name,
+			description: editAssetDescription.trim(),
+			role: editAssetRole.trim(),
+			age: editAssetAge.trim(),
+			personality: editAssetPersonality.trim(),
+			imagePath: editAssetImagePath,
+			imageChanged: editAssetImageChanged,
+		});
+	}
+
+	function createAsset() {
+		const name = createAssetName.trim();
+		if (!name || $createEntityMutation.isPending || uploadingCreateAssetImage) return;
+		$createEntityMutation.mutate({
+			kind: createAssetKind,
+			name,
+			description: createAssetDescription.trim(),
+			role: createAssetRole.trim(),
+			age: createAssetAge.trim(),
+			personality: createAssetPersonality.trim(),
+			imagePath: createAssetImagePath,
+		});
+	}
+
+	async function uploadCreateAssetImage(event: Event) {
+		const input = event.currentTarget as HTMLInputElement;
+		const file = input.files?.[0];
+		input.value = '';
+		if (!file) return;
+		if (!file.type.startsWith('image/')) {
+			toast.error(t('assets.toast.chooseImage'));
+			return;
+		}
+		uploadingCreateAssetImage = true;
+		try {
+			const uploaded = await playgroundApi.upload(file);
+			if (uploaded.kind !== 'image') {
+				toast.error(t('assets.toast.notImage'));
+				return;
+			}
+			if (editAssetOpen) {
+				editAssetImagePath = uploaded.path;
+				editAssetImageChanged = true;
+			} else {
+				createAssetImagePath = uploaded.path;
+			}
+			await client.invalidateQueries({ queryKey: ['library-media'] });
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : t('assets.toast.addImageFailed'));
+		} finally {
+			uploadingCreateAssetImage = false;
+		}
 	}
 
 	function requestDelete(target: DeleteTarget) {
@@ -515,11 +824,16 @@
 	}
 
 	async function generateCharacter(c: Character) {
-		const wfId = requireWorkflow(sheetWorkflowId, 'assets.wf.needSheet');
-		if (wfId == null) return;
-		if (!requireComplete(sheetMissing, () => (sheetAttempted = true))) return;
-		const prompt = sheetHasPrompt ? promptForChar(c) : '';
-		if (sheetHasPrompt) {
+		const model = routerModelOf(sheetWorkflowId);
+		let wfId: number | undefined;
+		if (!model) {
+			const required = requireWorkflow(sheetWorkflowId, 'assets.wf.needSheet');
+			if (required == null) return;
+			if (!requireComplete(sheetMissing, () => (sheetAttempted = true))) return;
+			wfId = required;
+		}
+		const prompt = model || sheetHasPrompt ? promptForChar(c) : '';
+		if (prompt) {
 			await projects.updateCharacter(projectId, c.id, { consistency_prompt: prompt });
 			const { [charKey(c.id)]: _, ...rest } = drafts;
 			drafts = rest;
@@ -530,17 +844,23 @@
 			location_ids: [],
 			asset_target: 'sheet',
 			workflow_id: wfId,
+			router_model: model ?? undefined,
 			input_values: compactInputValues(sheetInputValues),
 			prompt: prompt || undefined,
 		});
 	}
 
 	async function generateLocation(loc: Location) {
-		const wfId = requireWorkflow(envWorkflowId, 'assets.wf.needEnv');
-		if (wfId == null) return;
-		if (!requireComplete(envMissing, () => (envAttempted = true))) return;
-		const prompt = envHasPrompt ? promptForLoc(loc) : '';
-		if (envHasPrompt) {
+		const model = routerModelOf(envWorkflowId);
+		let wfId: number | undefined;
+		if (!model) {
+			const required = requireWorkflow(envWorkflowId, 'assets.wf.needEnv');
+			if (required == null) return;
+			if (!requireComplete(envMissing, () => (envAttempted = true))) return;
+			wfId = required;
+		}
+		const prompt = model || envHasPrompt ? promptForLoc(loc) : '';
+		if (prompt) {
 			await projects.updateLocation(projectId, loc.id, { consistency_prompt: prompt });
 			const { [locKey(loc.id)]: _, ...rest } = drafts;
 			drafts = rest;
@@ -550,17 +870,23 @@
 			character_ids: [],
 			location_ids: [loc.id],
 			workflow_id: wfId,
+			router_model: model ?? undefined,
 			input_values: compactInputValues(envInputValues),
 			prompt: prompt || undefined,
 		});
 	}
 
 	async function generateItem(item: Item) {
-		const wfId = requireWorkflow(itemWorkflowId, 'assets.wf.needItem');
-		if (wfId == null) return;
-		if (!requireComplete(itemMissing, () => (itemAttempted = true))) return;
-		const prompt = itemHasPrompt ? promptForItem(item) : '';
-		if (itemHasPrompt) {
+		const model = routerModelOf(itemWorkflowId);
+		let wfId: number | undefined;
+		if (!model) {
+			const required = requireWorkflow(itemWorkflowId, 'assets.wf.needItem');
+			if (required == null) return;
+			if (!requireComplete(itemMissing, () => (itemAttempted = true))) return;
+			wfId = required;
+		}
+		const prompt = model || itemHasPrompt ? promptForItem(item) : '';
+		if (prompt) {
 			await projects.updateItem(projectId, item.id, { consistency_prompt: prompt });
 			const { [itemKey(item.id)]: _, ...rest } = drafts;
 			drafts = rest;
@@ -571,6 +897,7 @@
 			location_ids: [],
 			item_ids: [item.id],
 			workflow_id: wfId,
+			router_model: model ?? undefined,
 			input_values: compactInputValues(itemInputValues),
 			prompt: prompt || undefined,
 		});
@@ -580,11 +907,21 @@
 		const chars = $assetsQuery.data?.characters ?? [];
 		const locs = $assetsQuery.data?.locations ?? [];
 		const items = $assetsQuery.data?.items ?? [];
-		const sheetWf = sheetWorkflowId === '' ? null : Number(sheetWorkflowId);
-		const envWf = envWorkflowId === '' ? null : Number(envWorkflowId);
-		const itemWf = itemWorkflowId === '' ? null : Number(itemWorkflowId);
+		const sheetModel = routerModelOf(sheetWorkflowId);
+		const envModel = routerModelOf(envWorkflowId);
+		const itemModel = routerModelOf(itemWorkflowId);
+		const sheetWf = sheetModel || sheetWorkflowId === '' ? null : Number(sheetWorkflowId);
+		const envWf = envModel || envWorkflowId === '' ? null : Number(envWorkflowId);
+		const itemWf = itemModel || itemWorkflowId === '' ? null : Number(itemWorkflowId);
 
-		if (sheetWf == null && envWf == null && itemWf == null) {
+		if (
+			!sheetModel &&
+			!envModel &&
+			!itemModel &&
+			sheetWf == null &&
+			envWf == null &&
+			itemWf == null
+		) {
 			toast.error(t('assets.wf.needWorkflow'));
 			return;
 		}
@@ -592,30 +929,33 @@
 		bulkPending = true;
 		try {
 			let total = 0;
-			if (sheetWf != null && chars.length > 0) {
+			if ((sheetModel || sheetWf != null) && chars.length > 0) {
 				const r = await projects.generateAssets(projectId, {
 					missing_only: true,
 					asset_target: 'sheet',
-					workflow_id: sheetWf,
+					workflow_id: sheetModel ? undefined : (sheetWf ?? undefined),
+					router_model: sheetModel ?? undefined,
 					character_ids: chars.map((c) => c.id),
 					input_values: compactInputValues(sheetInputValues),
 				});
 				total += r.jobs.length;
 			}
-			if (envWf != null && locs.length > 0) {
+			if ((envModel || envWf != null) && locs.length > 0) {
 				const r = await projects.generateAssets(projectId, {
 					missing_only: true,
-					workflow_id: envWf,
+					workflow_id: envModel ? undefined : (envWf ?? undefined),
+					router_model: envModel ?? undefined,
 					character_ids: [],
 					location_ids: locs.map((l) => l.id),
 					input_values: compactInputValues(envInputValues),
 				});
 				total += r.jobs.length;
 			}
-			if (itemWf != null && items.length > 0) {
+			if ((itemModel || itemWf != null) && items.length > 0) {
 				const r = await projects.generateAssets(projectId, {
 					missing_only: true,
-					workflow_id: itemWf,
+					workflow_id: itemModel ? undefined : (itemWf ?? undefined),
+					router_model: itemModel ?? undefined,
 					character_ids: [],
 					location_ids: [],
 					item_ids: items.map((it) => it.id),
@@ -702,6 +1042,13 @@
 	accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
 	onchange={onOwnImageChosen}
 />
+<input
+	bind:this={createAssetFileInput}
+	type="file"
+	class="sr-only"
+	accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+	onchange={uploadCreateAssetImage}
+/>
 
 <header class="stage-header">
 	<div>
@@ -709,6 +1056,9 @@
 		<p class="lead">{t('assets.lead')}</p>
 	</div>
 	<div class="stage-actions">
+		<Button variant="secondary" onclick={openCreateAsset}>
+			<Icon name="plus" size={14} /> {t('assets.addAsset')}
+		</Button>
 		<Button
 			variant="primary"
 			disabled={busy}
@@ -784,7 +1134,7 @@
 	onadded={() => client.invalidateQueries({ queryKey: ['assets'] })}
 />
 
-{#if imageWorkflows.length === 0}
+{#if imageWorkflows.length === 0 && !fluxOption}
 	<p class="hint-warn">
 		{t('assets.noWorkflowPre')} <a href="/settings?tab=workflows">{t('assets.noWorkflowLink')}</a>
 		{t('assets.noWorkflowPost')}
@@ -810,17 +1160,16 @@
 			<select
 				class="field-select"
 				value={sheetWorkflowId}
-				onchange={(e) => {
-					const v = e.currentTarget.value;
-					sheetWorkflowId = v ? Number(v) : '';
-				}}
+				onchange={(e) => (sheetWorkflowId = pickWorkflow(e.currentTarget.value))}
 			>
 				{#if imageWorkflows.length === 0}
 					<option value="">{t('assets.wf.none')}</option>
-				{:else}
-					{#each imageWorkflows as w}
-						<option value={w.id}>{w.name}</option>
-					{/each}
+				{/if}
+				{#each imageWorkflows as w (w.id)}
+					<option value={w.id}>{w.name}</option>
+				{/each}
+				{#if fluxOption}
+					<option value={fluxOption.value}>{fluxOption.label}</option>
 				{/if}
 			</select>
 		</label>
@@ -832,6 +1181,8 @@
 				showErrors={sheetAttempted}
 				onValidityChange={(m) => (sheetMissing = m)}
 			/>
+		{:else if routerModelOf(sheetWorkflowId)}
+			<p class="muted small">{t('router.fluxHint')}</p>
 		{:else}
 			<p class="muted small">{t('assets.wf.selectSheet')}</p>
 		{/if}
@@ -841,17 +1192,16 @@
 			<select
 				class="field-select"
 				value={envWorkflowId}
-				onchange={(e) => {
-					const v = e.currentTarget.value;
-					envWorkflowId = v ? Number(v) : '';
-				}}
+				onchange={(e) => (envWorkflowId = pickWorkflow(e.currentTarget.value))}
 			>
 				{#if imageWorkflows.length === 0}
 					<option value="">{t('assets.wf.none')}</option>
-				{:else}
-					{#each imageWorkflows as w}
-						<option value={w.id}>{w.name}</option>
-					{/each}
+				{/if}
+				{#each imageWorkflows as w (w.id)}
+					<option value={w.id}>{w.name}</option>
+				{/each}
+				{#if fluxOption}
+					<option value={fluxOption.value}>{fluxOption.label}</option>
 				{/if}
 			</select>
 		</label>
@@ -863,6 +1213,8 @@
 				showErrors={envAttempted}
 				onValidityChange={(m) => (envMissing = m)}
 			/>
+		{:else if routerModelOf(envWorkflowId)}
+			<p class="muted small">{t('router.fluxHint')}</p>
 		{:else}
 			<p class="muted small">{t('assets.wf.selectEnv')}</p>
 		{/if}
@@ -872,17 +1224,16 @@
 			<select
 				class="field-select"
 				value={itemWorkflowId}
-				onchange={(e) => {
-					const v = e.currentTarget.value;
-					itemWorkflowId = v ? Number(v) : '';
-				}}
+				onchange={(e) => (itemWorkflowId = pickWorkflow(e.currentTarget.value))}
 			>
 				{#if imageWorkflows.length === 0}
 					<option value="">{t('assets.wf.none')}</option>
-				{:else}
-					{#each imageWorkflows as w}
-						<option value={w.id}>{w.name}</option>
-					{/each}
+				{/if}
+				{#each imageWorkflows as w (w.id)}
+					<option value={w.id}>{w.name}</option>
+				{/each}
+				{#if fluxOption}
+					<option value={fluxOption.value}>{fluxOption.label}</option>
 				{/if}
 			</select>
 		</label>
@@ -894,6 +1245,8 @@
 				showErrors={itemAttempted}
 				onValidityChange={(m) => (itemMissing = m)}
 			/>
+		{:else if routerModelOf(itemWorkflowId)}
+			<p class="muted small">{t('router.fluxHint')}</p>
 		{:else}
 			<p class="muted small">{t('assets.wf.selectItem')}</p>
 		{/if}
@@ -988,6 +1341,14 @@
 								<Button
 									variant="secondary"
 									size="sm"
+									title={t('common.edit')}
+									onclick={() => openEditCharacter(char)}
+								>
+									<Icon name="edit" size={14} /><span class="sr-only">{t('common.edit')} {char.name}</span>
+								</Button>
+								<Button
+									variant="secondary"
+									size="sm"
 									title={t('assets.deleteCharacter')}
 									onclick={() =>
 										requestDelete({ kind: 'character', id: char.id, name: char.name })}
@@ -999,7 +1360,7 @@
 							</div>
 							{#if jstate === 'generating'}
 								<div class="gen-bar">
-									<ProgressBar indeterminate size="sm" label="{t('assets.generating')}" />
+									<ProgressBar indeterminate size="sm" label={t('assets.generating')} />
 								</div>
 							{/if}
 						</div>
@@ -1194,6 +1555,14 @@
 								<Button
 									variant="secondary"
 									size="sm"
+									title={t('common.edit')}
+									onclick={() => openEditLocation(loc)}
+								>
+									<Icon name="edit" size={14} /><span class="sr-only">{t('common.edit')} {loc.name}</span>
+								</Button>
+								<Button
+									variant="secondary"
+									size="sm"
 									title={t('assets.deleteEnvironment')}
 									onclick={() =>
 										requestDelete({ kind: 'location', id: loc.id, name: loc.name })}
@@ -1203,7 +1572,7 @@
 							</div>
 							{#if jstate === 'generating'}
 								<div class="gen-bar">
-									<ProgressBar indeterminate size="sm" label="{t('assets.generating')}" />
+									<ProgressBar indeterminate size="sm" label={t('assets.generating')} />
 								</div>
 							{/if}
 						</div>
@@ -1273,7 +1642,7 @@
 								{/if}
 							</div>
 
-							{#if envHasPrompt}
+							{#if envHasPrompt || routerModelOf(envWorkflowId)}
 								<details class="prompt-fold">
 									<summary>{t('assets.editPrompt')}</summary>
 									<label class="prompt-field">
@@ -1385,6 +1754,14 @@
 								<Button
 									variant="secondary"
 									size="sm"
+									title={t('common.edit')}
+									onclick={() => openEditItem(item)}
+								>
+									<Icon name="edit" size={14} /><span class="sr-only">{t('common.edit')} {item.name}</span>
+								</Button>
+								<Button
+									variant="secondary"
+									size="sm"
 									title={t('assets.deleteItem')}
 									onclick={() =>
 										requestDelete({ kind: 'item', id: item.id, name: item.name })}
@@ -1394,7 +1771,7 @@
 							</div>
 							{#if jstate === 'generating'}
 								<div class="gen-bar">
-									<ProgressBar indeterminate size="sm" label="{t('assets.generating')}" />
+									<ProgressBar indeterminate size="sm" label={t('assets.generating')} />
 								</div>
 							{/if}
 						</div>
@@ -1464,7 +1841,7 @@
 								{/if}
 							</div>
 
-							{#if itemHasPrompt}
+							{#if itemHasPrompt || routerModelOf(itemWorkflowId)}
 								<details class="prompt-fold">
 									<summary>{t('assets.editPrompt')}</summary>
 									<label class="prompt-field">
@@ -1515,6 +1892,308 @@
 		previewAlt = '';
 	}}
 />
+
+<Modal
+	bind:open={createAssetOpen}
+	title={t('assets.addTitle', { kind: kindNoun(createAssetKind) })}
+	resizable
+	closeOnBackdrop={false}
+	onclose={() => {
+		createAssetName = '';
+		createAssetDescription = '';
+		createAssetRole = '';
+		createAssetAge = '';
+		createAssetPersonality = '';
+	}}
+>
+	<form
+		onsubmit={(event) => {
+			event.preventDefault();
+			createAsset();
+		}}
+	>
+		<label class="field">
+			<span class="field-label">{t('common.name')}</span>
+			<input class="field-input" bind:value={createAssetName} required />
+		</label>
+		{#if createAssetKind === 'character'}
+			<div class="create-character-details">
+				<label class="field">
+					<span class="field-label">{t('assets.role')}</span>
+					<input class="field-input" bind:value={createAssetRole} />
+				</label>
+				<label class="field">
+					<span class="field-label">{t('assets.age')}</span>
+					<input
+						class="field-input"
+						maxlength="15"
+						bind:value={createAssetAge}
+					/>
+				</label>
+			</div>
+			<label class="field">
+				<span class="field-label">{t('assets.appearance')}</span>
+				<textarea class="field-textarea" rows="3" bind:value={createAssetDescription}></textarea>
+			</label>
+			<label class="field">
+				<span class="field-label">{t('assets.personality')}</span>
+				<textarea class="field-textarea" rows="3" bind:value={createAssetPersonality}></textarea>
+			</label>
+		{:else}
+			<label class="field">
+				<span class="field-label">{t('assets.description')}</span>
+				<textarea class="field-textarea" rows="3" bind:value={createAssetDescription}></textarea>
+			</label>
+		{/if}
+		<div class="field">
+			<span class="field-label">{t('assets.addImage')}</span>
+			<div class="create-image-actions">
+				<Button
+					variant="secondary"
+					size="sm"
+					loading={uploadingCreateAssetImage}
+					disabled={$createEntityMutation.isPending}
+					onclick={() => createAssetFileInput?.click()}
+				>
+					<Icon name="upload" size={13} /> {t('assets.uploadImage')}
+				</Button>
+				{#if createAssetImagePath}
+					<Button
+						variant="ghost"
+						size="sm"
+						disabled={$createEntityMutation.isPending}
+						onclick={() => (createAssetImagePath = null)}
+					>
+						{t('assets.removeSelectedImage')}
+					</Button>
+				{/if}
+			</div>
+			{#if $libraryMediaQuery.isLoading}
+				<p class="muted small">{t('common.loading')}</p>
+			{:else if $libraryMediaQuery.isError}
+				<p class="err-line">
+					{$libraryMediaQuery.error instanceof Error
+						? $libraryMediaQuery.error.message
+						: t('assets.libraryLoadFailed')}
+				</p>
+			{:else if ($libraryMediaQuery.data ?? []).filter((media) => media.kind === 'image').length > 0}
+				<p class="field-label">{t('assets.chooseLibraryImage')}</p>
+				<div class="create-image-grid" aria-label={t('assets.chooseLibraryImage')}>
+					{#each ($libraryMediaQuery.data ?? []).filter((media) => media.kind === 'image') as media (media.path)}
+						{@const src = assetUrl(media.path)}
+						<button
+							type="button"
+							class="create-image-option"
+							class:selected={createAssetImagePath === media.path}
+							aria-pressed={createAssetImagePath === media.path}
+							title={media.name}
+							disabled={$createEntityMutation.isPending}
+							onclick={() => (createAssetImagePath = media.path)}
+						>
+							{#if src}<img src={src} alt="" loading="lazy" />{/if}
+							<span>{media.name}</span>
+						</button>
+					{/each}
+				</div>
+			{:else}
+				<p class="muted small">{t('assets.noLibraryImages')}</p>
+			{/if}
+		</div>
+	</form>
+	{#snippet footer()}
+		<Button variant="ghost" onclick={() => (createAssetOpen = false)}>{t('common.cancel')}</Button>
+		<Button
+			variant="primary"
+			loading={$createEntityMutation.isPending}
+			disabled={!createAssetName.trim() || uploadingCreateAssetImage}
+			onclick={createAsset}
+		>
+			{t('assets.addAsset')}
+		</Button>
+	{/snippet}
+</Modal>
+
+<Modal
+	bind:open={editAssetOpen}
+	title={t('assets.editTitle', { kind: kindNoun(editAssetKind) })}
+	resizable
+	closeOnBackdrop={false}
+	onclose={() => {
+		editAssetId = null;
+		editAssetImageChanged = false;
+		roleSuggestionsOpen = false;
+	}}
+>
+	<form
+		onsubmit={(event) => {
+			event.preventDefault();
+			saveEditedAsset();
+		}}
+	>
+		<label class="field">
+			<span class="field-label">{t('common.name')}</span>
+			<input
+				class="field-input"
+				bind:value={editAssetName}
+				required
+				disabled={$updateEntityMutation.isPending}
+			/>
+		</label>
+		{#if editAssetKind === 'character'}
+			<div class="create-character-details">
+				<label class="field">
+					<span class="field-label">{t('assets.role')}</span>
+					<div class="role-field-control">
+						<div class="role-input-wrap">
+							<input
+								class="field-input"
+								bind:value={editAssetRole}
+								disabled={$updateEntityMutation.isPending}
+							/>
+							<button
+								type="button"
+								class="role-suggestions-toggle"
+								aria-label={t('assets.roleSuggestions')}
+								aria-expanded={roleSuggestionsOpen}
+								aria-controls={roleSuggestionsOpen ? 'edit-role-suggestions' : undefined}
+								title={t('assets.roleSuggestions')}
+								disabled={$updateEntityMutation.isPending}
+								onclick={() => (roleSuggestionsOpen = !roleSuggestionsOpen)}
+							>
+								<Icon name="lightbulb" size={16} />
+							</button>
+						</div>
+						{#if roleSuggestionsOpen}
+							<div id="edit-role-suggestions" class="role-suggestions" role="group" aria-label={t('assets.roleSuggestions')}>
+								{#each roleSuggestions as role (role)}
+									<button
+										type="button"
+										class:selected={editAssetRole === role}
+										aria-pressed={editAssetRole === role}
+										onclick={() => {
+											editAssetRole = role;
+											roleSuggestionsOpen = false;
+										}}
+									>
+										{role}
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				</label>
+				<label class="field">
+					<span class="field-label">{t('assets.age')}</span>
+					<input
+						class="field-input"
+						maxlength="15"
+						bind:value={editAssetAge}
+						disabled={$updateEntityMutation.isPending}
+					/>
+				</label>
+			</div>
+			<label class="field">
+				<span class="field-label">{t('assets.appearance')}</span>
+				<textarea
+					class="field-textarea"
+					rows="3"
+					bind:value={editAssetDescription}
+					disabled={$updateEntityMutation.isPending}
+				></textarea>
+			</label>
+			<label class="field">
+				<span class="field-label">{t('assets.personality')}</span>
+				<textarea
+					class="field-textarea"
+					rows="3"
+					bind:value={editAssetPersonality}
+					disabled={$updateEntityMutation.isPending}
+				></textarea>
+			</label>
+		{:else}
+			<label class="field">
+				<span class="field-label">{t('assets.description')}</span>
+				<textarea
+					class="field-textarea"
+					rows="3"
+					bind:value={editAssetDescription}
+					disabled={$updateEntityMutation.isPending}
+				></textarea>
+			</label>
+		{/if}
+		<div class="field">
+			<span class="field-label">{t('assets.addImage')}</span>
+			<div class="create-image-actions">
+				<Button
+					variant="secondary"
+					size="sm"
+					loading={uploadingCreateAssetImage}
+					disabled={$updateEntityMutation.isPending}
+					onclick={() => createAssetFileInput?.click()}
+				>
+					<Icon name="upload" size={13} /> {t('assets.uploadImage')}
+				</Button>
+				{#if editAssetImagePath}
+					<Button
+						variant="ghost"
+						size="sm"
+						disabled={$updateEntityMutation.isPending}
+						onclick={() => {
+							editAssetImagePath = null;
+							editAssetImageChanged = true;
+						}}
+					>
+						{t('assets.removeSelectedImage')}
+					</Button>
+				{/if}
+			</div>
+			{#if $libraryMediaQuery.isLoading}
+				<p class="muted small">{t('common.loading')}</p>
+			{:else if $libraryMediaQuery.isError}
+				<p class="err-line">
+					{$libraryMediaQuery.error instanceof Error
+						? $libraryMediaQuery.error.message
+						: t('assets.libraryLoadFailed')}
+				</p>
+			{:else if ($libraryMediaQuery.data ?? []).filter((media) => media.kind === 'image').length > 0}
+				<p class="field-label">{t('assets.chooseLibraryImage')}</p>
+				<div class="create-image-grid" aria-label={t('assets.chooseLibraryImage')}>
+					{#each ($libraryMediaQuery.data ?? []).filter((media) => media.kind === 'image') as media (media.path)}
+						{@const src = assetUrl(media.path)}
+						<button
+							type="button"
+							class="create-image-option"
+							class:selected={editAssetImagePath === media.path}
+							aria-pressed={editAssetImagePath === media.path}
+							title={media.name}
+							disabled={$updateEntityMutation.isPending}
+							onclick={() => {
+								editAssetImagePath = media.path;
+								editAssetImageChanged = true;
+							}}
+						>
+							{#if src}<img src={src} alt="" loading="lazy" />{/if}
+							<span>{media.name}</span>
+						</button>
+					{/each}
+				</div>
+			{:else}
+				<p class="muted small">{t('assets.noLibraryImages')}</p>
+			{/if}
+		</div>
+	</form>
+	{#snippet footer()}
+		<Button variant="ghost" onclick={() => (editAssetOpen = false)}>{t('common.cancel')}</Button>
+		<Button
+			variant="primary"
+			loading={$updateEntityMutation.isPending}
+			disabled={!editAssetName.trim() || uploadingCreateAssetImage}
+			onclick={saveEditedAsset}
+		>
+			{t('common.save')}
+		</Button>
+	{/snippet}
+</Modal>
 
 <ConfirmDialog
 	bind:open={deleteOpen}
@@ -1766,6 +2445,126 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.create-character-details {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 120px;
+		gap: 12px;
+	}
+	.role-field-control {
+		position: relative;
+	}
+	.role-input-wrap {
+		position: relative;
+	}
+	.role-input-wrap .field-input {
+		padding-right: 40px;
+	}
+	.role-suggestions-toggle {
+		position: absolute;
+		top: 50%;
+		right: 6px;
+		display: grid;
+		width: 28px;
+		height: 28px;
+		place-items: center;
+		transform: translateY(-50%);
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+	.role-suggestions-toggle:hover:not(:disabled) {
+		background: rgba(255, 255, 255, 0.06);
+		color: var(--accent);
+	}
+	.role-suggestions-toggle:focus-visible,
+	.role-suggestions button:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+	.role-suggestions-toggle:disabled {
+		cursor: not-allowed;
+		opacity: 0.45;
+	}
+	.role-suggestions {
+		position: absolute;
+		top: calc(100% + 6px);
+		right: 0;
+		left: 0;
+		z-index: 2;
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 4px;
+		max-height: 220px;
+		overflow-y: auto;
+		padding: 6px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--bg-surface);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+	}
+	.role-suggestions button {
+		padding: 7px 8px;
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: 12px;
+		text-align: left;
+		cursor: pointer;
+	}
+	.role-suggestions button:hover,
+	.role-suggestions button.selected {
+		background: rgba(255, 255, 255, 0.07);
+		color: var(--text-primary);
+	}
+	.create-image-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin-bottom: 10px;
+	}
+	.create-image-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+		gap: 8px;
+		max-height: 220px;
+		overflow-y: auto;
+		padding: 2px;
+	}
+	.create-image-option {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		min-width: 0;
+		padding: 4px;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--bg-elevated);
+		color: var(--text-secondary);
+		font: inherit;
+		font-size: 11px;
+		text-align: left;
+		cursor: pointer;
+	}
+	.create-image-option:hover,
+	.create-image-option.selected {
+		border-color: var(--accent);
+		color: var(--text-primary);
+	}
+	.create-image-option img {
+		width: 100%;
+		aspect-ratio: 1;
+		object-fit: cover;
+		border-radius: calc(var(--radius-sm) - 2px);
+	}
+	.create-image-option span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.row {
 		display: flex;

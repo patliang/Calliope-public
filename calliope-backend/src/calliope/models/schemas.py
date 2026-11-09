@@ -181,6 +181,7 @@ class SceneCreate(BaseModel):
     beat_id: int | None = None
     character_ids: list[int] = Field(default_factory=list)
     location_id: int | None = None
+    item_ids: list[int] = Field(default_factory=list)
 
 
 class SceneUpdate(BaseModel):
@@ -194,6 +195,7 @@ class SceneUpdate(BaseModel):
     beat_id: int | None = None
     character_ids: list[int] | None = None
     location_id: int | None = None
+    item_ids: list[int] | None = None
     video_path: str | None = None
     # Persisted video-stage setup: form input_values, prompt draft + metadata.
     # Serialized into scenes.video_settings_json.
@@ -282,6 +284,8 @@ class GenerateAssetsRequest(BaseModel):
     asset_target: str | None = "sheet"
     # Optional one-shot prompt override (must still be user-visible text from the UI).
     prompt: str | None = None
+    # Opt-in Comfy Router model. Empty keeps the local workflow path.
+    router_model: str | None = None
 
 
 class GenerateScenesRequest(BaseModel):
@@ -299,6 +303,13 @@ class GenerateVideosRequest(BaseModel):
     # Clip-id → confirmed prompt text (from the review modal). Wins over the
     # LLM rewrite and over any saved draft.
     prompts: dict[int, str] | None = None
+    # Opt-in Comfy Router model. Empty keeps the local workflow path.
+    router_model: str | None = None
+    # Reference-to-video images for Router MiniMax H3, in picker order.
+    # Each item is a local path or {"path", "name"}.
+    router_images: list[Any] | None = None
+    # Duration box on the Router form. Clip duration is used when this is omitted.
+    duration_sec: float | None = None
 
 
 class PreviewPromptRequest(BaseModel):
