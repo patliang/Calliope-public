@@ -3,6 +3,7 @@
 	import { toStore } from 'svelte/store';
 	import { createMutation, createQuery, useQueryClient } from '@tanstack/svelte-query';
 	import {
+		assetLibraryApi,
 		assetUrl,
 		jobsApi,
 		libraryApi,
@@ -10,6 +11,7 @@
 		projects,
 		settings as settingsApi,
 		workflows,
+		type AssetKind,
 		type Character,
 		type Item,
 		type Job,
@@ -43,7 +45,6 @@
 		itemReferenceTemplate,
 		locationReferenceTemplate,
 	} from '$lib/promptTemplates';
-	import { assetLibraryApi, settings as settingsApi, type AssetKind } from '$lib/api';
 	import { tagMatches } from '$lib/tags';
 	import { toast } from '$lib/toast';
 	import { t } from '$lib/i18n.svelte';
