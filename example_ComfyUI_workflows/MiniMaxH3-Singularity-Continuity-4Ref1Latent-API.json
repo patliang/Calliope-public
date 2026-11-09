@@ -192,7 +192,7 @@
   },
   "371": {
     "inputs": {
-      "clip_name": "MiniMax-H3\\qwen3vl_32b_minimax_h3_generation_tail_50_63_int8_convrot.safetensors",
+      "clip_name": "minimax-h3\\qwen3vl_32b_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
       "type": "minimax",
       "device": "default"
     },

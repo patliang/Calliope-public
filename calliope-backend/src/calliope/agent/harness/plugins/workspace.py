@@ -166,6 +166,21 @@ def register(registry: ToolRegistry) -> None:
             category="workspace",
         )
     )
+    registry.register(
+        ToolDefinition(
+            name="list_assets",
+            description=(
+                "List the project's reference assets (characters, locations, "
+                "items) with their image file paths. Compact — returns only "
+                "id, name, and path per asset (no prompts/descriptions). Use "
+                "this to get sheet_path / reference_image_path for pinning "
+                "into video_settings.input_values."
+            ),
+            parameters={"type": "object", "properties": {}},
+            executor=t_list_assets,
+            category="workspace",
+        )
+    )
 
 
 _WS_SECTIONS = ("beats", "characters", "locations", "items", "scenes")
@@ -439,5 +454,44 @@ async def t_list_projects(ctx: ToolContext, args: dict[str, Any]) -> list[dict[s
             "SELECT * FROM projects WHERE status != 'system' ORDER BY updated_at DESC"
         ).fetchall()
         return [row_to_dict(r) | {"stats": _project_stats(r["id"], conn)} for r in rows]
+    finally:
+        conn.close()
+
+
+async def t_list_assets(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """Compact asset listing: id, name, path only (no prompts/descriptions)."""
+    conn = _db()
+    try:
+        if ctx.project_id is None:
+            return {"ok": False, "error": "No project linked"}
+        characters = [
+            {"id": r["id"], "name": r["name"], "path": r["sheet_path"] or r["portrait_path"]}
+            for r in conn.execute(
+                "SELECT id, name, sheet_path, portrait_path FROM characters "
+                "WHERE project_id = ? ORDER BY id",
+                (ctx.project_id,),
+            ).fetchall()
+        ]
+        locations = [
+            {"id": r["id"], "name": r["name"], "path": r["reference_image_path"]}
+            for r in conn.execute(
+                "SELECT id, name, reference_image_path FROM locations "
+                "WHERE project_id = ? ORDER BY id",
+                (ctx.project_id,),
+            ).fetchall()
+        ]
+        items = [
+            {"id": r["id"], "name": r["name"], "path": r["reference_image_path"]}
+            for r in conn.execute(
+                "SELECT id, name, reference_image_path FROM items "
+                "WHERE project_id = ? ORDER BY id",
+                (ctx.project_id,),
+            ).fetchall()
+        ]
+        return {
+            "characters": characters,
+            "locations": locations,
+            "items": items,
+        }
     finally:
         conn.close()

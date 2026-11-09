@@ -55,7 +55,7 @@ MEMORY_FORGOTTEN = "memory/forgotten"
 # permissions. Loops drain these between steps and inject them as context.
 STEERING_MESSAGE = "steering/message"
 
-TOOL_RESULT_TRUNCATE = 4000
+TOOL_RESULT_TRUNCATE = 12000
 # Appended wherever a tool result is cut for the LLM. Must TEACH the way out —
 # a bare "[truncated]" sends agents into retry loops hoping for a different
 # cut (observed live 2026-08-24: an assets sub-agent re-called get_workspace
@@ -64,7 +64,8 @@ TRUNCATE_NOTE = (
     "…[truncated — the full result is too large for one reply. Fetch a "
     "smaller slice instead of retrying: get_workspace accepts "
     "sections=[\"characters\",\"locations\",\"items\",\"beats\",\"scenes\"], "
-    "and scoped tools (get_story, list_scenes) return less.]"
+    "list_scenes accepts compact=true for a minimal per-scene summary, and "
+    "scoped tools (get_story, list_assets) return less.]"
 )
 
 # Cap for ANY single event payload at append time: keeps the append-only log

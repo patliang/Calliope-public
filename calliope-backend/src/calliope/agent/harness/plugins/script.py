@@ -11,6 +11,7 @@ from calliope.agent.harness.registry import (
     _db,
 )
 from calliope.db import row_to_dict
+from calliope.queue import chain
 
 
 def annotate_scene_row(s: dict[str, Any]) -> dict[str, Any]:
@@ -107,7 +108,10 @@ def register(registry: ToolRegistry) -> None:
                 "'scene 25' meaning order=25 — NEVER treat that as scene_id. "
                 "Optional query (heading/action text) or orders (clip numbers) "
                 "to search without dumping the whole timeline. Each scene also "
-                "reports its clip count (scenes expand into 1+ shot clips)."
+                "reports its clip count (scenes expand into 1+ shot clips). "
+                "Use compact=true for a minimal per-scene summary (id, order, "
+                "location_id, character_ids, clip_ids) that fits all scenes in "
+                "one call — ideal for batch configuration workflows."
             ),
             parameters={
                 "type": "object",
@@ -120,6 +124,10 @@ def register(registry: ToolRegistry) -> None:
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": "Video page clip numbers (#1, #25) — not scene_id",
+                    },
+                    "compact": {
+                        "type": "boolean",
+                        "description": "Return minimal fields only (id, order, location_id, character_ids, clip_ids). Use for batch operations to avoid truncation.",
                     },
                 },
             },
@@ -267,8 +275,11 @@ def register(registry: ToolRegistry) -> None:
             name="update_clip",
             description=(
                 "Edit one clip (description / shot_size / dialog_lines_covered / "
-                "duration_sec / workflow_id). Address it by "
-                "clip_id (from list_clips) or ref '#3.2'."
+                "duration_sec / workflow_id / video_settings). Address it by "
+                "clip_id (from list_clips) or ref '#3.2'. "
+                "video_settings accepts {chain_start: bool, input_values: "
+                "{nodeId: path}} to pin reference images and chain flags. "
+                "Server-owned keys (latent_path, continued_from_*) are preserved."
             ),
             parameters={
                 "type": "object",
@@ -286,6 +297,30 @@ def register(registry: ToolRegistry) -> None:
                     },
                     "duration_sec": {"type": "number"},
                     "workflow_id": {"type": "integer"},
+                    "video_settings": {
+                        "type": "object",
+                        "description": (
+                            "Merged into the clip's video_settings. Use "
+                            "chain_start (bool) to mark a new chain and "
+                            "input_values ({nodeId: filePath}) to pin "
+                            "reference images to (Input:image) slots."
+                        ),
+                        "properties": {
+                            "chain_start": {
+                                "type": "boolean",
+                                "description": "True = start a new latent chain here",
+                            },
+                            "input_values": {
+                                "type": "object",
+                                "additionalProperties": True,
+                                "description": (
+                                    "ComfyUI nodeId → asset file path. Keys are "
+                                    "the (Input:image) node ids from the workflow "
+                                    "JSON, in node-id order (lowest = Subject 1)."
+                                ),
+                            },
+                        },
+                    },
                 },
             },
             executor=t_update_clip,
@@ -463,6 +498,7 @@ async def t_list_scenes(ctx: ToolContext, args: dict[str, Any]) -> list[dict[str
                 or query in (s.get("action") or "").lower()
                 or query in (s.get("dialog") or "").lower()
             ]
+        compact = bool(args.get("compact"))
         for s in scenes:
             chars = conn.execute(
                 """
@@ -480,6 +516,23 @@ async def t_list_scenes(ctx: ToolContext, args: dict[str, Any]) -> list[dict[str
                 "SELECT COUNT(*) AS n FROM clips WHERE scene_id = ? AND clip_path IS NOT NULL",
                 (s["id"],),
             ).fetchone()["n"]
+        if compact:
+            return [
+                {
+                    "id": s["id"],
+                    "order": s.get("order"),
+                    "location_id": s.get("location_id"),
+                    "character_ids": [c["id"] for c in s["characters"]],
+                    "clip_ids": [
+                        r["id"]
+                        for r in conn.execute(
+                            "SELECT id FROM clips WHERE scene_id = ? ORDER BY order_index, id",
+                            (s["id"],),
+                        ).fetchall()
+                    ],
+                }
+                for s in scenes
+            ]
         return scenes
     finally:
         conn.close()
@@ -915,6 +968,12 @@ async def t_update_clip(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
             data["dialog_lines_covered"] = json.dumps(
                 [int(i) for i in args["dialog_lines_covered"]]
             )
+        # video_settings: merge into existing, preserving server-owned keys
+        video_settings = args.get("video_settings")
+        if isinstance(video_settings, dict) and video_settings:
+            existing = chain.read_settings(conn, clip_id)
+            merged = chain.keep_server_owned(video_settings, existing)
+            data["video_settings_json"] = json.dumps(merged, ensure_ascii=False)
         if not data:
             return {"ok": False, "error": "Nothing to update"}
         fields = ", ".join(f"{k} = :{k}" for k in data)

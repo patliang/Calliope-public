@@ -1,10 +1,13 @@
 <script lang="ts">
 	import { createMutation, createQuery, useQueryClient } from '@tanstack/svelte-query';
 	import { toStore } from 'svelte/store';
+	import { goto } from '$app/navigation';
 	import { toast } from '$lib/toast';
 	import { t } from '$lib/i18n.svelte';
 	import {
+		agentApi,
 		assetUrl,
+		canvasApi,
 		jobsApi,
 		playgroundApi,
 		projects,
@@ -406,6 +409,7 @@
 	let batchNote = $state('');
 	let compiling = $state(false);
 	let compileNote = $state('');
+		let configuring = $state(false);
 
 	/** Every clip in the project, in playback order — the batch compile targets. */
 	const allClipIds = $derived(
@@ -540,6 +544,27 @@
 		} finally {
 			compiling = false;
 			compileNote = '';
+		}
+	}
+
+	/**
+	 * One-click skill run: create a project agent session, send the
+	 * shot-video-config prompt, and open the canvas chat so the user can
+	 * watch the agent configure references, workflows, and chain-start.
+	 */
+	async function configReferencesAndWorkflows() {
+		if (configuring) return;
+		configuring = true;
+		try {
+			const session = await agentApi.createSession({ project_id: projectId });
+			await agentApi.postMessage(session.id, 'Set up references for every clip');
+			const graph = await canvasApi.ensureForProject(projectId, projectTitle);
+			await client.invalidateQueries({ queryKey: ['agent-sessions'] });
+			goto(`/canvas/${graph.canvas.id}?session=${session.id}`);
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			configuring = false;
 		}
 	}
 
@@ -850,6 +875,16 @@
 			>
 				<Icon name="sparkle" size={14} />
 				{compiling ? compileNote || t('queue.compilingPrompts') : t('queue.compilePrompts')}
+			</Button>
+			<Button
+				variant="secondary"
+				disabled={configuring || batching}
+				loading={configuring}
+				title={t('queue.configRefsTitle')}
+				onclick={configReferencesAndWorkflows}
+			>
+				<Icon name="settings" size={14} />
+				{configuring ? t('queue.configRefsStarting') : t('queue.configRefs')}
 			</Button>
 		{/if}
 		<Button variant="secondary" onclick={togglePause}>

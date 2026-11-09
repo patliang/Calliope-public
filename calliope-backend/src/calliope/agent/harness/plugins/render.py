@@ -1295,11 +1295,45 @@ async def t_list_workflows(ctx: ToolContext, args: dict[str, Any]) -> list[dict[
     try:
         rows = conn.execute(
             """
-            SELECT id, name, kind, description, prompt_profile, is_enabled
+            SELECT id, name, kind, description, prompt_profile, is_enabled,
+                   input_schema
             FROM workflows WHERE is_enabled = 1 ORDER BY kind, id
             """
         ).fetchall()
-        return [row_to_dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = row_to_dict(r)
+            # Parse input_schema so the agent can see (Input:image) node IDs
+            raw_schema = d.pop("input_schema", None)
+            image_ids: list[str] = []
+            if raw_schema:
+                try:
+                    schema = json.loads(raw_schema)
+                    # Keep only the fields the agent needs for slot mapping
+                    d["inputs"] = [
+                        {
+                            "nodeId": e.get("nodeId"),
+                            "kind": e.get("kind"),
+                            "label": e.get("label"),
+                        }
+                        for e in schema
+                    ]
+                    image_ids = [
+                        str(e["nodeId"])
+                        for e in schema
+                        if e.get("kind") == "image"
+                    ]
+                except (json.JSONDecodeError, TypeError):
+                    d["inputs"] = []
+            else:
+                d["inputs"] = []
+            d["image_node_ids"] = image_ids
+            # Drop verbose fields the agent rarely needs
+            d.pop("description", None)
+            d.pop("prompt_profile", None)
+            d.pop("is_enabled", None)
+            out.append(d)
+        return out
     finally:
         conn.close()
 
